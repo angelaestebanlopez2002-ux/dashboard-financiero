@@ -175,10 +175,17 @@ def recategorizar(df: pd.DataFrame, reglas: pd.DataFrame, categorias: pd.DataFra
     """Recalcula Categoria/Tipo para las filas cuya Categoria esté vacía (no toca las que
     el usuario ya haya corregido a mano)."""
     df = df.copy()
+    if df.empty:
+        return df
     mask = df["Categoria"].isna() | (df["Categoria"].astype(str).str.strip() == "")
-    df.loc[mask, "Categoria"] = df.loc[mask].apply(
-        lambda r: categorize(r["Concepto"], r["Importe"], reglas), axis=1
-    )
+    # Ojo: en algunas versiones de pandas, `.apply(axis=1)` sobre 0 filas devuelve el
+    # propio DataFrame vacío (con todas sus columnas) en vez de una Series vacía, lo
+    # que rompe la asignación con un ValueError. Si no hay nada que categorizar, no
+    # llamamos a apply en absoluto.
+    if mask.any():
+        df.loc[mask, "Categoria"] = df.loc[mask].apply(
+            lambda r: categorize(r["Concepto"], r["Importe"], reglas), axis=1
+        )
     df["Tipo"] = df.apply(
         lambda r: tipo_de_categoria(r["Categoria"], categorias, r["Importe"]), axis=1
     )
