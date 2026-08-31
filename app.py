@@ -36,6 +36,7 @@ def _init_state():
         "presupuesto": fz.empty_presupuesto(),
         "pendientes": None,  # DataFrame de movimientos extraídos, en revisión
         "pendientes_version": 0,  # cambia en cada extracción para forzar una tabla nueva
+        "tx_version": 0,  # cambia cuando "transacciones" crece/cambia por fuera de la propia tabla de Movimientos
         "flash": None,  # mensaje a mostrar tras un st.rerun() (tipo, texto)
     }
     for k, v in defaults.items():
@@ -84,6 +85,7 @@ with st.sidebar:
                 if "transacciones.csv" in names:
                     with zf.open("transacciones.csv") as f:
                         st.session_state["transacciones"] = pd.read_csv(f)
+                    st.session_state["tx_version"] += 1
                 if "categorias.csv" in names:
                     with zf.open("categorias.csv") as f:
                         st.session_state["categorias"] = pd.read_csv(f)
@@ -105,6 +107,7 @@ with st.sidebar:
             tx_up = st.file_uploader("transacciones.csv", type="csv", key="tx_up")
             if tx_up is not None:
                 st.session_state["transacciones"] = pd.read_csv(tx_up)
+                st.session_state["tx_version"] += 1
             cat_up = st.file_uploader("categorias.csv", type="csv", key="cat_up")
             if cat_up is not None:
                 st.session_state["categorias"] = pd.read_csv(cat_up)
@@ -232,6 +235,10 @@ if st.session_state["pendientes"] is not None:
         st.session_state["transacciones"] = pd.concat(
             [st.session_state["transacciones"], nuevas], ignore_index=True
         )
+        # Fuerza a que la tabla de Movimientos se re-cree con los datos nuevos en
+        # vez de devolver su estado recordado de antes de esta importación (ver
+        # el key dinámico de esa tabla, más abajo).
+        st.session_state["tx_version"] += 1
         st.session_state["pendientes"] = None
         msg = f"{len(nuevas)} movimiento(s) incorporado(s)."
         if n_dup:
@@ -373,7 +380,11 @@ with tab_movs:
             "Categoria": st.column_config.SelectboxColumn(options=list(st.session_state["categorias"]["Categoria"])),
             "Tipo": st.column_config.SelectboxColumn(options=["Ingreso", "Gasto", "Transferencia"]),
         },
-        key="editor_movimientos",
+        # Key dinámica (igual que en la tabla de revisión de pendientes): si no
+        # cambiara, tras una importación esta tabla podía devolver su estado
+        # recordado de ANTES de esa importación (menos filas) y sobreescribir
+        # con eso el histórico recién ampliado, perdiendo lo importado.
+        key=f"editor_movimientos_{st.session_state['tx_version']}",
     )
     # Igual que en las tablas de Categorías/Reglas/Cuentas/Presupuesto: se reescribe
     # el estado en cada ejecución con lo que devuelva el editor, sin esperar a que
@@ -389,11 +400,19 @@ with tab_movs:
 with tab_config:
     st.header("Categorías, reglas de auto-categorización, cuentas y presupuesto")
 
+    # Nota sobre los keys de las tablas de abajo: incluyen el número de filas
+    # actual (len(...)). Así, si los datos de la tabla cambian por fuera de la
+    # propia tabla (p.ej. "Cuentas" al importar con "+ Nueva cuenta...", o al
+    # restaurar un ZIP/CSV), Streamlit crea un widget "nuevo" en vez de devolver
+    # su estado recordado de antes de ese cambio y sobreescribirlo por encima
+    # — el mismo problema que causaba que una importación se perdiera en
+    # Movimientos. Editar una celda (sin añadir/quitar filas) no cambia el
+    # número de filas, así que el guardado automático normal no se ve afectado.
     st.subheader("Categorías")
     st.session_state["categorias"] = st.data_editor(
         st.session_state["categorias"], num_rows="dynamic", use_container_width=True,
         column_config={"Tipo": st.column_config.SelectboxColumn(options=["Ingreso", "Gasto", "Transferencia"])},
-        key="editor_categorias",
+        key=f"editor_categorias_{len(st.session_state['categorias'])}",
     )
 
     st.subheader("Reglas de categorización automática")
@@ -407,14 +426,14 @@ with tab_config:
         column_config={
             "Categoria": st.column_config.SelectboxColumn(options=list(st.session_state["categorias"]["Categoria"])),
         },
-        key="editor_reglas",
+        key=f"editor_reglas_{len(st.session_state['reglas'])}",
     )
 
     st.subheader("Cuentas")
     st.session_state["cuentas"] = st.data_editor(
         st.session_state["cuentas"], num_rows="dynamic", use_container_width=True,
         column_config={"TipoCuenta": st.column_config.SelectboxColumn(options=["Banco", "Efectivo", "Inversion", "Tarjeta de credito"])},
-        key="editor_cuentas",
+        key=f"editor_cuentas_{len(st.session_state['cuentas'])}",
     )
 
     st.subheader("Presupuesto mensual por categoría")
@@ -424,5 +443,5 @@ with tab_config:
             "Categoria": st.column_config.SelectboxColumn(options=list(st.session_state["categorias"]["Categoria"])),
             "Mes": st.column_config.NumberColumn(min_value=1, max_value=12, step=1),
         },
-        key="editor_presupuesto",
+        key=f"editor_presupuesto_{len(st.session_state['presupuesto'])}",
     )
