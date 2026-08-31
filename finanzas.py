@@ -209,6 +209,12 @@ def recategorizar(df: pd.DataFrame, reglas: pd.DataFrame, categorias: pd.DataFra
 _DATE_RE = re.compile(r"\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})\b")
 _AMOUNT_RE = re.compile(r"-?\d{1,3}(?:[.\s]\d{3})*,\d{2}\s?€?|-?\d+,\d{2}\s?€?")
 
+_MESES_ES = {
+    "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+    "jul": 7, "ago": 8, "sep": 9, "set": 9, "oct": 10, "nov": 11, "dic": 12,
+}
+_TR_AMOUNT_TOKEN_RE = re.compile(r"^€?(\d{1,3}(?:\.\d{3})*,\d{2})€?$")
+
 
 def _parse_importe_es(s: str) -> float | None:
     s = s.strip().replace("€", "").replace(" ", "")
@@ -275,8 +281,134 @@ def parse_statement_text(text: str, cuenta: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["Fecha", "Cuenta", "Concepto", "Importe"])
 
 
+def _looks_like_trade_republic(text: str) -> bool:
+    t = text.upper()
+    return "TRADE REPUBLIC" in t and "TRANSACCIONES DE CUENTA" in t
+
+
+def parse_trade_republic_pdf(file, cuenta: str) -> pd.DataFrame:
+    """Parser específico para los extractos de Trade Republic.
+
+    El extracto de Trade Republic es una tabla de 6 columnas (Fecha, Tipo,
+    Descripción, Entrada de dinero, Salida de dinero, Balance) donde varias
+    celdas envuelven a una segunda línea (la fecha se parte en "DD mon" +
+    "AAAA", la descripción y el tipo pueden ocupar 1-2 líneas). Al extraer el
+    texto con pdfplumber de forma lineal (extract_text) esas líneas quedan
+    intercaladas entre columnas y el parser genérico (basado en "fecha al
+    principio de la línea") no reconoce ninguna fila.
+    Aquí se reconstruyen las filas a partir de la posición (x, y) de cada
+    palabra en la página: se agrupan por columna según su coordenada x0 y por
+    fila según su coordenada y (con un salto entre filas mucho mayor que el
+    salto entre las 2-3 líneas de una misma fila). Verificado con un extracto
+    real: el balance calculado fila a fila cuadra exactamente con el balance
+    inicial y final del resumen del documento.
+    """
+    import pdfplumber
+
+    rows: list[dict] = []
+
+    def _flush(row_words: list[dict]) -> None:
+        if not row_words:
+            return
+        cols: dict[str, list[dict]] = {"fecha": [], "tipo": [], "desc": [], "amt": []}
+        for w in row_words:
+            x0 = w["x0"]
+            if x0 < 96:
+                cols["fecha"].append(w)
+            elif x0 < 145:
+                cols["tipo"].append(w)
+            elif x0 < 402:
+                cols["desc"].append(w)
+            else:
+                cols["amt"].append(w)
+
+        def _jointext(ws: list[dict]) -> str:
+            ws2 = sorted(ws, key=lambda w: (round(w["top"], 1), w["x0"]))
+            return " ".join(w["text"] for w in ws2)
+
+        fecha_txt = _jointext(cols["fecha"])
+        tipo_txt = _jointext(cols["tipo"])
+        desc_txt = _jointext(cols["desc"])
+
+        m = re.search(r"(\d{1,2})\s+([a-zA-Zé]{3})\s+(\d{4})", fecha_txt)
+        fecha_iso = None
+        if m:
+            d, mon, y = m.groups()
+            mes_num = _MESES_ES.get(mon.lower())
+            if mes_num:
+                try:
+                    fecha_iso = datetime(int(y), mes_num, int(d)).strftime("%Y-%m-%d")
+                except ValueError:
+                    fecha_iso = None
+        if fecha_iso is None:
+            # No es una fila de movimiento real (p.ej. texto legal de la
+            # última página) — se descarta en vez de incorporar basura.
+            return
+
+        # Importe: cada palabra de la zona de importes es un token separado;
+        # se identifica cuál es cantidad (con o sin € pegado) y se ordena por
+        # x0. El primero (más a la izquierda) es Entrada o Salida; el
+        # siguiente es el Balance (que se ignora aquí, solo sirvió para
+        # verificar la extracción durante el desarrollo).
+        amt_tokens = []
+        for w in cols["amt"]:
+            mm = _TR_AMOUNT_TOKEN_RE.match(w["text"])
+            if mm:
+                amt_tokens.append((w["x0"], _parse_importe_es(mm.group(1))))
+        amt_tokens.sort(key=lambda t: t[0])
+        if len(amt_tokens) < 2:
+            return
+        first_x0, first_val = amt_tokens[0]
+        if first_val is None:
+            return
+        importe = first_val if first_x0 < 427 else -first_val
+
+        concepto = re.sub(r"null\b", "", desc_txt).strip()
+        if not concepto:
+            concepto = tipo_txt.strip()
+        rows.append({"Fecha": fecha_iso, "Cuenta": cuenta, "Concepto": concepto, "Importe": importe})
+
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+            header_tops = [w["top"] for w in words if w["text"] == "DESCRIPCIÓN"]
+            header_bottom = max(header_tops) + 5 if header_tops else 0
+            cutoff_tops = [
+                w["top"] for w in words
+                if w["top"] > header_bottom and w["text"] in ("www.traderepublic.es", "RESUMEN")
+            ]
+            footer_top = min(cutoff_tops) - 5 if cutoff_tops else page.height
+
+            content_words = [w for w in words if header_bottom <= w["top"] <= footer_top]
+            content_words = sorted(content_words, key=lambda w: (round(w["top"], 1), w["x0"]))
+
+            last_top = None
+            current_row_words: list[dict] = []
+            for w in content_words:
+                top = w["top"]
+                is_new_row = w["x0"] < 96 and re.match(r"^\d{1,2}$", w["text"]) and (
+                    last_top is None or (top - last_top) > 15
+                )
+                if is_new_row and current_row_words:
+                    _flush(current_row_words)
+                    current_row_words = []
+                current_row_words.append(w)
+                last_top = top
+            _flush(current_row_words)
+
+    return pd.DataFrame(rows, columns=["Fecha", "Cuenta", "Concepto", "Importe"])
+
+
 def parse_statement_pdf(file, cuenta: str) -> pd.DataFrame:
     text = extract_pdf_text(file)
+    if _looks_like_trade_republic(text):
+        # El formato de Trade Republic (fecha partida en 2 líneas, columnas
+        # separadas de entrada/salida) no encaja con el parser genérico
+        # línea a línea — usa el parser dedicado basado en posición.
+        file.seek(0)
+        tr_df = parse_trade_republic_pdf(file, cuenta)
+        if not tr_df.empty:
+            return tr_df
     return parse_statement_text(text, cuenta)
 
 
