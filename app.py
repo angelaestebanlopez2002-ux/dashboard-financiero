@@ -131,6 +131,15 @@ with st.sidebar:
             accept_multiple_files=True,
         )
         if st.button("🔍 Extraer movimientos", use_container_width=True) and up and cuenta_sel:
+            # Si es una cuenta que no estaba en el catálogo (p.ej. escrita en
+            # "+ Nueva cuenta..."), la damos de alta automáticamente para que
+            # también aparezca en la pestaña Cuentas y en el formulario de saldos
+            # de Patrimonio. El usuario puede corregir su TipoCuenta después.
+            if cuenta_sel not in list(st.session_state["cuentas"]["Cuenta"]):
+                nueva_cuenta = pd.DataFrame([{"Cuenta": cuenta_sel, "TipoCuenta": "Banco"}])
+                st.session_state["cuentas"] = pd.concat(
+                    [st.session_state["cuentas"], nueva_cuenta], ignore_index=True
+                )
             piezas = []
             for f in up:
                 if tipo_archivo.startswith("PDF"):
