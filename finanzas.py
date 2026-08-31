@@ -151,7 +151,10 @@ def empty_presupuesto() -> pd.DataFrame:
 def categorize(concepto: str, importe: float, reglas: pd.DataFrame) -> str:
     """Aplica las reglas en orden de prioridad. Si ninguna coincide, usa Bizum u
     'Otros ingresos'/'Otros gastos' como último recurso según el signo del importe."""
-    texto = (concepto or "").lower()
+    # pd.notna() en vez de "concepto or ''": un Concepto vacío llega como NaN
+    # (float), no como "" — y NaN es "truthy" en Python, así que "concepto or ''"
+    # no lo detecta y el .lower() de más abajo revienta con AttributeError.
+    texto = str(concepto).lower() if pd.notna(concepto) else ""
     for _, row in reglas.sort_values("Prioridad").iterrows():
         patron = str(row["Patron"])
         try:
@@ -177,6 +180,13 @@ def recategorizar(df: pd.DataFrame, reglas: pd.DataFrame, categorias: pd.DataFra
     df = df.copy()
     if df.empty:
         return df
+    # Si "Categoria" llega totalmente vacía (p.ej. un CSV restaurado sin esa
+    # columna rellena), pandas la tipa como float64 (todo huecos) en vez de
+    # texto, y luego no deja escribir un nombre de categoría (texto) ahí sin
+    # fallar. Se fuerza a dtype "object" primero para poder escribir texto
+    # siempre, pase lo que pase con cómo llegaron los datos.
+    if df["Categoria"].dtype != object:
+        df["Categoria"] = df["Categoria"].astype(object)
     mask = df["Categoria"].isna() | (df["Categoria"].astype(str).str.strip() == "")
     # Ojo: en algunas versiones de pandas, `.apply(axis=1)` sobre 0 filas devuelve el
     # propio DataFrame vacío (con todas sus columnas) en vez de una Series vacía, lo
