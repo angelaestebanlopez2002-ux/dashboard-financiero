@@ -292,7 +292,15 @@ def make_ids(df: pd.DataFrame) -> pd.Series:
     duplicados al reimportar un mes que ya estaba cargado."""
 
     def _h(row):
-        raw = f"{row['Fecha']}|{row['Cuenta']}|{row['Concepto']}|{round(float(row['Importe']), 2)}"
+        # Si el Importe viene vacío (p.ej. una fila nueva añadida con "+" en una
+        # tabla, sin rellenar todavía), float(None) rompería con TypeError. Se
+        # trata como 0.0 en vez de fallar — igualmente esa fila no debería
+        # incorporarse hasta tener datos válidos (eso lo filtra dropna aparte).
+        try:
+            importe = round(float(row["Importe"]), 2)
+        except (TypeError, ValueError):
+            importe = 0.0
+        raw = f"{row['Fecha']}|{row['Cuenta']}|{row['Concepto']}|{importe}"
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
     return df.apply(_h, axis=1)
@@ -401,9 +409,18 @@ def fig_line_diario(tx_mes: pd.DataFrame, anio: int, mes: int) -> go.Figure:
     gastos_dia = pd.Series(0.0, index=range(1, n_dias + 1))
     df = tx_mes[tx_mes["Tipo"] == "Gasto"].copy()
     if not df.empty:
-        df["dia"] = pd.to_datetime(df["Fecha"]).dt.day
-        agg = -df.groupby("dia")["Importe"].sum()
-        gastos_dia.update(agg)
+        # Se fuerza a numérico/entero por robustez: si "Importe" o "Fecha" traen algo
+        # no estrictamente float/fecha (p.ej. tras una edición manual o una restauración
+        # de CSV), agg podía quedar con un dtype que Series.update() ya no admite en
+        # pandas recientes (levanta TypeError/LossySetitemError en vez de convertir).
+        # Con .add(..., fill_value=0.0) se evita ese problema por completo.
+        df["Importe"] = pd.to_numeric(df["Importe"], errors="coerce").fillna(0.0)
+        df["dia"] = pd.to_datetime(df["Fecha"], errors="coerce").dt.day
+        df = df.dropna(subset=["dia"])
+        if not df.empty:
+            agg = -df.groupby("dia")["Importe"].sum()
+            agg.index = agg.index.astype(int)
+            gastos_dia = gastos_dia.add(agg.astype(float), fill_value=0.0)
     acumulado = gastos_dia.cumsum()
     fig = go.Figure(
         go.Scatter(
