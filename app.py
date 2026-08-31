@@ -35,6 +35,8 @@ def _init_state():
         "saldos": fz.empty_saldos(),
         "presupuesto": fz.empty_presupuesto(),
         "pendientes": None,  # DataFrame de movimientos extraídos, en revisión
+        "pendientes_version": 0,  # cambia en cada extracción para forzar una tabla nueva
+        "flash": None,  # mensaje a mostrar tras un st.rerun() (tipo, texto)
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -59,6 +61,14 @@ def _read_csv_upload(file, cols=None) -> pd.DataFrame:
 # ====================================================================================
 with st.sidebar:
     st.title("💶 Dashboard Financiero")
+
+    # Mensaje de resultado de la última acción (importación, guardado...). Se
+    # guarda en session_state en vez de mostrarse justo antes de un st.rerun(),
+    # porque si no desaparece antes de que llegues a verlo.
+    if st.session_state.get("flash"):
+        tipo, texto = st.session_state["flash"]
+        getattr(st, tipo)(texto)
+        st.session_state["flash"] = None
 
     with st.expander("📂 Tus datos (cargar progreso guardado)", expanded=len(st.session_state["transacciones"]) == 0):
         st.caption(
@@ -160,6 +170,10 @@ with st.sidebar:
                 st.session_state["reglas"], st.session_state["categorias"],
             )
             st.session_state["pendientes"] = extraido
+            # Cambiar la versión fuerza a que la tabla de revisión de abajo sea un
+            # widget "nuevo" para Streamlit, sin arrastrar ediciones/borrados de una
+            # importación anterior que usara la misma tabla.
+            st.session_state["pendientes_version"] += 1
             st.success(f"{len(extraido)} movimiento(s) detectado(s). Revísalos abajo antes de confirmar ⬇️")
 
     st.divider()
@@ -198,7 +212,10 @@ if st.session_state["pendientes"] is not None:
             "Importe": st.column_config.NumberColumn(format="%.2f €"),
             "Categoria": st.column_config.SelectboxColumn(options=list(st.session_state["categorias"]["Categoria"])),
         },
-        key="editor_pendientes",
+        # Key dinámica: cada nueva extracción usa una tabla distinta para
+        # Streamlit, para que no arrastre ediciones/filas borradas de la
+        # revisión de una importación anterior sobre los datos nuevos.
+        key=f"editor_pendientes_{st.session_state['pendientes_version']}",
     )
     col1, col2, col3 = st.columns([1, 1, 4])
     with col1:
@@ -219,7 +236,10 @@ if st.session_state["pendientes"] is not None:
         msg = f"{len(nuevas)} movimiento(s) incorporado(s)."
         if n_dup:
             msg += f" ({n_dup} descartado(s) por estar ya en el histórico)."
-        st.success(msg)
+        # Se guarda para mostrarse después del rerun (si se llama a st.success
+        # justo antes de st.rerun(), el mensaje desaparece antes de que te dé
+        # tiempo a leerlo).
+        st.session_state["flash"] = ("success", msg)
         st.rerun()
     if descartar:
         st.session_state["pendientes"] = None
