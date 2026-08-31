@@ -342,7 +342,7 @@ with tab_anual:
 # ------------------------------------------------------------------- Movimientos ---
 with tab_movs:
     st.header("Movimientos")
-    st.caption("Edita directamente cualquier movimiento (por ejemplo, para corregir una categoría). Los cambios se guardan al vuelo.")
+    st.caption("Edita directamente cualquier movimiento (por ejemplo, para corregir una categoría). Los cambios se guardan solos, en cuanto sales de la celda — no hace falta ningún botón.")
     edited_tx = st.data_editor(
         tx.sort_values("Fecha", ascending=False) if not tx.empty else tx,
         num_rows="dynamic",
@@ -355,14 +355,15 @@ with tab_movs:
         },
         key="editor_movimientos",
     )
-    if st.button("💾 Guardar cambios en movimientos"):
-        if "id" in edited_tx.columns:
-            missing = edited_tx["id"].isna()
-            if missing.any():
-                edited_tx.loc[missing, "id"] = fz.make_ids(edited_tx.loc[missing])
-        st.session_state["transacciones"] = edited_tx
-        st.success("Guardado.")
-        st.rerun()
+    # Igual que en las tablas de Categorías/Reglas/Cuentas/Presupuesto: se reescribe
+    # el estado en cada ejecución con lo que devuelva el editor, sin esperar a que
+    # se pulse ningún botón — así una corrección de categoría se refleja de
+    # inmediato en los dashboards (y queda incluida al descargar el ZIP).
+    if "id" in edited_tx.columns and len(edited_tx):
+        missing = edited_tx["id"].isna() | (edited_tx["id"].astype(str).str.strip() == "")
+        if missing.any():
+            edited_tx.loc[missing, "id"] = fz.make_ids(edited_tx.loc[missing])
+    st.session_state["transacciones"] = edited_tx
 
 # --------------------------------------------------------- Categorías y cuentas ----
 with tab_config:
